@@ -7,36 +7,28 @@ fun main() {
       // {
       Opcode.StartBlock.ordinal,
       // let i0 = 0 / 1
-      Opcode.BConst.ordinal, 1,
-      Opcode.BConst.ordinal, 0,
-      Opcode.Divide.ordinal,
-      Opcode.StoreLocal.ordinal,
+      Opcode.BConst.ordinal, 1, Opcode.BConst.ordinal, 0, Opcode.Divide.ordinal, Opcode.StoreLocal.ordinal,
       // i0 = 10
-      Opcode.IConst.ordinal, 10,
-      Opcode.AssignLocal.ordinal, 0,
-      Opcode.GetLocal.ordinal, 0,
+      Opcode.IConst.ordinal, 10, Opcode.AssignLocal.ordinal, 0,
       // if(!i0) {
-      Opcode.JumpIfElse.ordinal, 10,
+      Opcode.GetLocal.ordinal, 0, Opcode.JumpIfElse.ordinal, 10,
       // i0 = 100
-      Opcode.IConst.ordinal, 100,
-      Opcode.AssignLocal.ordinal, 0,
+      Opcode.IConst.ordinal, 100, Opcode.AssignLocal.ordinal, 0,
       // } else {
       Opcode.Jump.ordinal, 4,
       // i0 = 200
-      Opcode.IConst.ordinal, 200,
-      Opcode.AssignLocal.ordinal, 0,
+      Opcode.IConst.ordinal, 200, Opcode.AssignLocal.ordinal, 0,
       // }
       Opcode.EndBlock.ordinal,
       // #> 10 to 10 <#
-      Opcode.IConst.ordinal, 10,
-      Opcode.IConst.ordinal, 10,
-      Opcode.SpawnObject.ordinal, 1,
+      Opcode.IConst.ordinal, 10, Opcode.IConst.ordinal, 10, Opcode.SpawnObject.ordinal, 1,
       //value
       Opcode.IConst.ordinal, 5,
       //key
-      Opcode.IConst.ordinal, 20,
-      Opcode.AssignObject.ordinal, 0,
-      Opcode.DeleteObject.ordinal, 0
+      Opcode.IConst.ordinal, 20, Opcode.AssignObject.ordinal, 0, Opcode.PopHeap.ordinal, 0,
+      Opcode.DeclareFunction.ordinal, 0, 0,
+      Opcode.CallFunction.ordinal, 0, 0,
+      Opcode.PopHeap.ordinal, 0
     )
   )
   
@@ -44,29 +36,32 @@ fun main() {
 }
 
 enum class Opcode {
-  BConst, IConst,
-  FConst, Not,
-  Add, Minus,
-  Multiply, Divide,
+  BConst, IConst, FConst,
+  Not, Add, Minus, Multiply, Divide,
+  Pop,
   StoreLocal, GetLocal, AssignLocal,
   GetLocalAt, AssignLocalAt,
   StartBlock, EndBlock,
   Jump, JumpIf, JumpIfElse,
-  SpawnObject, DeleteObject, AssignObject,
-  
+  SpawnObject, PopHeap, AssignObject, DeclareFunction, CallFunction
 }
+
+typealias Executable = List<Int>
 
 class VM {
   //Anything local like numbers and such
   private val stack = mutableListOf<StackEntry>()
+  
   //Variables
   private val frame = mutableListOf<StackEntry>()
+  
   //Variable scope ranges
   private val frameRanges = mutableListOf(0..0)
+  
   //Larger objects (objects, lists)
   val heap = mutableListOf<HeapEntry>()
   
-  fun run(instructions: List<Int>) {
+  fun run(instructions: Executable) {
     val list = instructions.toMutableList()
     
     val jumpBy = { offset: Int -> for (i in 0..<offset) list.removeFirst() }
@@ -85,15 +80,30 @@ class VM {
         Opcode.Minus -> stack.add(stack.removeLast() - stack.removeLast())
         Opcode.Divide -> stack.add(stack.removeLast() / stack.removeLast())
         Opcode.Multiply -> stack.add(stack.removeLast() * stack.removeLast())
+        Opcode.Pop -> stack.removeLast()
         Opcode.StoreLocal -> {
-          frameRanges[frameRanges.lastIndex] = frameRanges[frameRanges.lastIndex]
-            .let { it.first..(it.last + 1) }
+          frameRanges[frameRanges.lastIndex] = frameRanges[frameRanges.lastIndex].let { it.first..(it.last + 1) }
           
           frame.add(stack.removeLast())
         }
         
         Opcode.GetLocal -> stack.add(frame[frame.lastIndex - list.removeFirst()])
         Opcode.AssignLocal -> frame[list.removeFirst()] = stack.removeLast()
+        Opcode.GetLocalAt -> {
+          val frameIdx = list.removeFirst()
+          val at = list.removeFirst()
+          
+          val frameStart = frameRanges.reversed().subList(0, frameIdx).sumOf { it.count() }
+          stack.add(frame[frame.size - (frameStart + at)])
+        }
+        
+        Opcode.AssignLocalAt -> {
+          val frameIdx = list.removeFirst()
+          val at = list.removeFirst()
+          
+          val frameStart = frameRanges.reversed().subList(0, frameIdx).sumOf { it.count() }
+          frame[frame.size - (frameStart + at)] = stack.removeLast()
+        }
         
         Opcode.StartBlock -> frameRanges.add(0..0)
         Opcode.EndBlock -> frameRanges.removeLast().let { for (i in 0..<it.last) frame.removeLast() }
@@ -120,14 +130,7 @@ class VM {
           heap.add(obj)
         }
         
-        Opcode.DeleteObject -> {
-          val idx = list.removeFirst()
-          if (heap[idx] !is ObjectEntry) {
-            error("Index is not a valid object on the heap")
-          }
-          heap.removeAt(idx)
-        }
-        
+        Opcode.PopHeap -> heap.removeAt(list.removeFirst())
         Opcode.AssignObject -> {
           val idx = list.removeFirst()
           
@@ -136,6 +139,40 @@ class VM {
           }
           
           (heap[idx] as ObjectEntry).entries[stack.removeLast()] = stack.removeLast()
+        }
+        
+        Opcode.CallFunction -> {
+          val idx = list.removeFirst()
+          
+          val func = heap[idx]
+          
+          if (func !is FunctionEntry) {
+            error("Index is not a valid function on the heap")
+          }
+          
+          val params = list.removeFirst()
+          val paramsList = mutableListOf<StackEntry>()
+          
+          for (i in 0..<params) {
+            paramsList.add(stack.removeLast())
+          }
+          list.add(0, Opcode.StartBlock.ordinal)
+          list.add(1, Opcode.EndBlock.ordinal)
+          list.addAll(1, func.exec)
+        }
+        
+        Opcode.DeclareFunction -> {
+          val params = list.removeFirst()
+          val blockLength = list.removeFirst()
+          
+          val code = mutableListOf<Number>()
+          
+          for (i in 0..<blockLength) {
+            code.add(list.removeFirst())
+          }
+          
+          @Suppress("UNCHECKED_CAST")
+          heap.add(FunctionEntry(params, code as Executable))
         }
       }
     }
@@ -234,3 +271,5 @@ data class FloatEntry(val value: Float) : StackEntry {
 sealed interface HeapEntry
 
 data class ObjectEntry(val entries: MutableMap<StackEntry, StackEntry> = mutableMapOf()) : HeapEntry
+
+data class FunctionEntry(val params: Int, val exec: Executable) : HeapEntry
